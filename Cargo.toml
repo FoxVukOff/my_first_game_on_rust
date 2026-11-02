@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.20"
+rodio = "0.18"
 
-# Фикс конфликта windows 0.58 vs 0.62 в wgpu-hal/gpu-allocator на Windows
 [target.'cfg(windows)'.dependencies]
 windows = "0.62.2"
 windows-core = { version = "0.62.2", features = ["std"] }
