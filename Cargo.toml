@@ -6,9 +6,7 @@ edition = "2024"
 [dependencies]
 bevy = "0.20"
 
-# Фикс для Windows/DX12:
-# принудительно тянем windows/windows-core 0.62,
-# чтобы gpu-allocator и wgpu-hal использовали одни и те же COM-типы.
+# Фикс конфликта windows 0.58 vs 0.62 в wgpu-hal/gpu-allocator на Windows
 [target.'cfg(windows)'.dependencies]
 windows = "0.62.2"
 windows-core = { version = "0.62.2", features = ["std"] }
