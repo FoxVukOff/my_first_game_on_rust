@@ -1,0 +1,17 @@
+[package]
+name = "river_relax"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.20"
+
+# Фикс для Windows/DX12:
+# принудительно тянем windows/windows-core 0.62,
+# чтобы gpu-allocator и wgpu-hal использовали одни и те же COM-типы.
+[target.'cfg(windows)'.dependencies]
+windows = "0.62.2"
+windows-core = { version = "0.62.2", features = ["std"] }
+
+[profile.dev]
+debug = 0
