@@ -9,20 +9,36 @@ use std::f32::consts::PI;
 
 // ---------- КОНСТАНТЫ ----------
 const EYE: f32 = 1.62;
-const SAND_TOP: f32 = 0.16;
-const WORLD_X: f32 = 38.0;
-const WORLD_Z: f32 = 24.0;
-const RIVER_EDGE: f32 = 8.6;
+const WATER_Y: f32 = 0.0;
+const SAND_TOP: f32 = 0.25;
+const WORLD_X: f32 = 60.0;
+const BEACH_MIN_Z: f32 = -1.5;
+const BEACH_MAX_Z: f32 = 42.0;
 
-const SKY: Color = Color::srgb(0.55, 0.76, 0.93);
-const SUN_POS: Vec3 = Vec3::new(58.0, 20.0, -152.0);
+const SKY: Color = Color::srgb(0.50, 0.73, 0.93);
+const SUN_POS: Vec3 = Vec3::new(60.0, 42.0, -300.0);
 
-// ---------- РЕЖИМЫ ----------
+const BAR_POS: Vec3 = Vec3::new(11.0, SAND_TOP, 19.0);
+
+// ---------- РЕЖИМЫ / НАПИТКИ ----------
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 enum RelaxMode {
     #[default]
     Resting,
     Walking,
+}
+
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum DrinkKind {
+    #[default]
+    Lemonade,
+    Coffee,
+}
+
+#[derive(Resource, Default)]
+struct DrinkState {
+    holding: bool,
+    selected: DrinkKind,
 }
 
 // ---------- КОМПОНЕНТЫ ----------
@@ -34,15 +50,23 @@ struct Player {
 }
 
 #[derive(Component)]
-struct Water;
-
-#[derive(Component)]
-struct WaterSheen;
+struct Ocean;
 
 #[derive(Component)]
 struct Foam {
-    lane: f32,
+    base_z: f32,
+    phase: f32,
     speed: f32,
+}
+
+#[derive(Component)]
+struct Sparkle {
+    phase: f32,
+}
+
+#[derive(Component)]
+struct Steam {
+    base: Vec3,
     phase: f32,
 }
 
@@ -54,21 +78,9 @@ struct Sway {
 }
 
 #[derive(Component)]
-struct Frond {
-    base_rot: Quat,
-    phase: f32,
-}
-
-#[derive(Component)]
-struct Mote {
-    base: Vec3,
-    phase: f32,
-    radius: f32,
+struct CloudPuff {
     speed: f32,
 }
-
-#[derive(Component)]
-struct CloudPuff;
 
 #[derive(Component)]
 struct Bird {
@@ -80,27 +92,29 @@ struct Bird {
 }
 
 #[derive(Component)]
-struct Drink {
-    rest: Vec3,
-    mouth: Vec3,
-    walk: Vec3,
+struct Yacht {
+    base: Vec3,
+    phase: f32,
 }
 
 #[derive(Component)]
-struct Accessory {
-    offset: Vec3,
-    rot: Quat,
+struct DrinkGroup {
+    kind: DrinkKind,
+}
+
+#[derive(Component)]
+struct DrinkScale {
+    current: f32,
+}
+
+#[derive(Component)]
+struct BarIndicator {
+    kind: DrinkKind,
 }
 
 // ---------- РЕСУРСЫ ----------
 #[derive(Resource)]
 struct Obstacles(Vec<(f32, f32, f32)>);
-
-#[derive(Resource, Default)]
-struct DrinkPose {
-    translation: Vec3,
-    rotation: Quat,
-}
 
 // ---------- ГЕНЕРАТОР ----------
 fn next_rand(rng: &mut u32) -> f32 {
@@ -114,8 +128,8 @@ fn main() {
         .add_plugins(
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "River Relax".into(),
-                    resolution: WindowResolution::new(1600, 900),
+                    title: "River Relax — Ocean Edition".into(),
+                    resolution: WindowResolution::new(1920, 1080),
                     resizable: true,
                     ..default()
                 }),
@@ -124,19 +138,20 @@ fn main() {
         )
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
-            color: Color::srgb(0.72, 0.82, 0.95),
-            brightness: 150.0,
+            color: Color::srgb(0.70, 0.80, 0.95),
+            brightness: 180.0,
             ..default()
         })
         .init_resource::<RelaxMode>()
-        .init_resource::<DrinkPose>()
+        .init_resource::<DrinkState>()
         .add_systems(Startup, setup)
         .add_systems(Update, camera_control)
-        .add_systems(Update, drink_system)
-        .add_systems(Update, accessory_system.after(drink_system))
-        .add_systems(Update, (sway_system, frond_system, water_system))
-        .add_systems(Update, (sheen_system, foam_system, mote_system))
-        .add_systems(Update, (cloud_system, bird_system))
+        .add_systems(Update, drink_input)
+        .add_systems(Update, drink_animation.after(drink_input))
+        .add_systems(Update, bar_indicator_system)
+        .add_systems(Update, (sway_system, water_system, foam_system))
+        .add_systems(Update, (sparkle_system, steam_system, cloud_system))
+        .add_systems(Update, (bird_system, yacht_system))
         .run();
 }
 
@@ -146,18 +161,21 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    println!("=== River Relax ===");
+    println!("===== OCEAN RELAX =====");
     println!("E      - встать / лечь в гамак");
-    println!("WASD   - ходить (когда встал)");
+    println!("WASD   - ходить");
     println!("Mouse  - осмотреться");
     println!("Shift  - быстрее");
-    println!("SPACE  - отпить лимонада");
-    println!("===================");
+    println!("SPACE  - достать / убрать напиток");
+    println!("1      - выбрать ЛИМОНАД");
+    println!("2      - выбрать КОФЕ");
+    println!("Бар-стойка стоит на пляже справа.");
+    println!("=======================");
 
     // ---- КАМЕРА: HDR + ACES + Bloom + туман ----
     let mut bloom = Bloom::default();
-    bloom.intensity = 0.32;
-    bloom.prefilter.threshold = 0.75;
+    bloom.intensity = 0.35;
+    bloom.prefilter.threshold = 0.7;
 
     commands.spawn((
         Camera3d::default(),
@@ -167,12 +185,12 @@ fn setup(
         DistanceFog {
             color: SKY,
             falloff: FogFalloff::Linear {
-                start: 35.0,
-                end: 280.0,
+                start: 60.0,
+                end: 430.0,
             },
             ..default()
         },
-        Transform::from_xyz(-1.62, 1.06, 13.95),
+        Transform::from_xyz(-1.0, 1.15, 10.0),
         Player {
             yaw: 0.0,
             pitch: 0.0,
@@ -180,13 +198,13 @@ fn setup(
         },
     ));
 
-    // ---- СОЛНЦЕ ----
+    // ---- СОЛНЦЕ (направленный свет) ----
     let to_sun = SUN_POS.normalize();
     commands.spawn((
         DirectionalLight {
-            illuminance: 32_000.0,
+            illuminance: 34_000.0,
             shadow_maps_enabled: true,
-            color: Color::srgb(1.0, 0.93, 0.80),
+            color: Color::srgb(1.0, 0.94, 0.82),
             ..default()
         },
         Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, -to_sun)),
@@ -194,39 +212,39 @@ fn setup(
     ));
 
     // ---- МАТЕРИАЛЫ ----
-    let mat_water = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.03, 0.22, 0.36),
-        metallic: 0.35,
-        perceptual_roughness: 0.045,
-        emissive: LinearRgba::from(Color::srgb(0.0, 0.05, 0.09)) * 1.5,
+    let mat_ocean = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.02, 0.20, 0.38),
+        metallic: 0.40,
+        perceptual_roughness: 0.05,
+        emissive: LinearRgba::from(Color::srgb(0.0, 0.05, 0.10)) * 1.6,
         ..default()
     });
-    let mat_sheen = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.35, 0.72, 0.82),
+    let mat_shallow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.10, 0.45, 0.55),
         alpha_mode: AlphaMode::Blend,
-        metallic: 0.55,
-        perceptual_roughness: 0.02,
-        emissive: LinearRgba::from(Color::srgb(0.08, 0.2, 0.26)) * 2.0,
+        metallic: 0.30,
+        perceptual_roughness: 0.08,
+        emissive: LinearRgba::from(Color::srgb(0.02, 0.12, 0.14)) * 1.4,
         ..default()
     });
-    let mat_bed = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.42, 0.38, 0.28),
+    let mat_seabed = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.34, 0.28),
         perceptual_roughness: 0.95,
         ..default()
     });
     let mat_foam = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.96, 0.99, 1.0),
+        base_color: Color::srgb(0.97, 0.99, 1.0),
         alpha_mode: AlphaMode::Blend,
-        emissive: LinearRgba::from(Color::srgb(0.4, 0.5, 0.55)) * 1.2,
+        emissive: LinearRgba::from(Color::srgb(0.5, 0.55, 0.6)) * 1.1,
         ..default()
     });
     let mat_sand = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.93, 0.85, 0.66),
+        base_color: Color::srgb(0.94, 0.86, 0.66),
         perceptual_roughness: 0.98,
         ..default()
     });
     let mat_sand_dark = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.86, 0.76, 0.56),
+        base_color: Color::srgb(0.86, 0.76, 0.55),
         perceptual_roughness: 0.9,
         ..default()
     });
@@ -246,24 +264,9 @@ fn setup(
         perceptual_roughness: 0.72,
         ..default()
     });
-    let mat_frond_dry = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.35, 0.48, 0.16),
-        perceptual_roughness: 0.8,
-        ..default()
-    });
     let mat_coco = materials.add(StandardMaterial {
         base_color: Color::srgb(0.32, 0.2, 0.11),
         perceptual_roughness: 0.85,
-        ..default()
-    });
-    let mat_rock = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.52, 0.52, 0.5),
-        perceptual_roughness: 0.88,
-        ..default()
-    });
-    let mat_shell = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.98, 0.93, 0.86),
-        perceptual_roughness: 0.4,
         ..default()
     });
     let mat_cloth = materials.add(StandardMaterial {
@@ -301,39 +304,9 @@ fn setup(
         perceptual_roughness: 0.85,
         ..default()
     });
-    let mat_lemon = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.9, 0.28),
-        emissive: LinearRgba::from(Color::srgb(1.0, 0.85, 0.2)) * 3.2,
-        perceptual_roughness: 0.25,
-        ..default()
-    });
-    let mat_ice = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.96, 1.0),
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 0.08,
-        metallic: 0.1,
-        ..default()
-    });
-    let mat_straw = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.95, 0.35, 0.35),
-        emissive: LinearRgba::from(Color::srgb(0.3, 0.08, 0.08)),
-        perceptual_roughness: 0.4,
-        ..default()
-    });
-    let mat_wood = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.62, 0.44, 0.26),
-        perceptual_roughness: 0.82,
-        ..default()
-    });
-    let mat_canopy = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.98, 0.72, 0.2),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    let mat_ball = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.95, 0.35, 0.55),
-        emissive: LinearRgba::from(Color::srgb(0.25, 0.05, 0.1)) * 1.5,
-        perceptual_roughness: 0.35,
+    let mat_rock = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.52, 0.52, 0.5),
+        perceptual_roughness: 0.88,
         ..default()
     });
     let mat_bush = materials.add(StandardMaterial {
@@ -341,13 +314,8 @@ fn setup(
         perceptual_roughness: 0.85,
         ..default()
     });
-    let mat_hill = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.24, 0.42, 0.28),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let mat_hill_far = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.36, 0.48, 0.58),
+    let mat_island = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.36, 0.24),
         perceptual_roughness: 0.95,
         ..default()
     });
@@ -363,25 +331,83 @@ fn setup(
         ..default()
     });
     let mat_bird = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.98, 0.98, 0.96),
-        perceptual_roughness: 0.8,
-        ..default()
-    });
-    let mat_mote = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.96, 0.8),
-        emissive: LinearRgba::from(Color::srgb(1.0, 0.92, 0.6)) * 6.0,
-        unlit: true,
+        base_color: Color::srgb(0.10, 0.10, 0.11),
+        perceptual_roughness: 1.0,
         ..default()
     });
     let mat_sun = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.95, 0.78),
-        emissive: LinearRgba::from(Color::srgb(1.0, 0.86, 0.55)) * 26.0,
+        base_color: Color::srgb(1.0, 0.96, 0.80),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.87, 0.55)) * 28.0,
         ..default()
     });
     let mat_halo = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.92, 0.7),
         alpha_mode: AlphaMode::Blend,
-        emissive: LinearRgba::from(Color::srgb(1.0, 0.85, 0.5)) * 2.6,
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.85, 0.5)) * 2.8,
+        ..default()
+    });
+    let mat_sparkle = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.98, 0.9),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.95, 0.8)) * 8.0,
+        unlit: true,
+        ..default()
+    });
+    // Напитки
+    let mat_lemonade = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.88, 0.22),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.85, 0.15)) * 3.0,
+        perceptual_roughness: 0.2,
+        ..default()
+    });
+    let mat_lemon = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.92, 0.2),
+        emissive: LinearRgba::from(Color::srgb(1.0, 0.88, 0.1)) * 3.5,
+        perceptual_roughness: 0.3,
+        ..default()
+    });
+    let mat_straw = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.3, 0.3),
+        emissive: LinearRgba::from(Color::srgb(0.4, 0.08, 0.08)) * 1.2,
+        perceptual_roughness: 0.4,
+        ..default()
+    });
+    let mat_coffee = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.16, 0.08),
+        emissive: LinearRgba::from(Color::srgb(0.25, 0.12, 0.05)) * 1.6,
+        perceptual_roughness: 0.4,
+        ..default()
+    });
+    let mat_mug = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.92, 0.9, 0.86),
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    let mat_steam = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 1.0, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        emissive: LinearRgba::from(Color::srgb(0.8, 0.85, 0.9)) * 0.8,
+        ..default()
+    });
+    // Бар
+    let mat_wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.44, 0.26),
+        perceptual_roughness: 0.82,
+        ..default()
+    });
+    let mat_wood_dark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.30, 0.17),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let mat_canopy = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.98, 0.66, 0.16),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    let mat_board = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 0.16, 0.12),
+        emissive: LinearRgba::from(Color::srgb(0.12, 0.09, 0.06)) * 1.2,
+        perceptual_roughness: 0.9,
         ..default()
     });
 
@@ -390,393 +416,147 @@ fn setup(
     let m_cuboid = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let m_cyl = meshes.add(Cylinder::new(1.0, 1.0));
 
-    // ---- ВОДА ----
-    spawn_scaled(
-        &mut commands,
-        m_cuboid.clone(),
-        mat_bed.clone(),
-        Vec3::new(0.0, -0.42, 0.0),
-        Vec3::new(190.0, 0.1, 21.0),
-    );
-
+    // ---- ОКЕАН: дно + глубина + мелководье ----
+    spawn_scaled(&mut commands, m_cuboid.clone(), mat_seabed.clone(), Vec3::new(0.0, -1.4, -200.0), Vec3::new(800.0, 0.4, 420.0));
     commands.spawn((
         Mesh3d(m_cuboid.clone()),
-        MeshMaterial3d(mat_water.clone()),
+        MeshMaterial3d(mat_ocean.clone()),
         Transform {
-            translation: Vec3::new(0.0, -0.05, 0.0),
-            scale: Vec3::new(190.0, 0.08, 20.0),
+            translation: Vec3::new(0.0, -0.12, -200.0),
+            scale: Vec3::new(800.0, 0.25, 420.0),
             ..default()
         },
-        Water,
+        Ocean,
     ));
-
     commands.spawn((
         Mesh3d(m_cuboid.clone()),
-        MeshMaterial3d(mat_sheen.clone()),
+        MeshMaterial3d(mat_shallow.clone()),
         Transform {
-            translation: Vec3::new(0.0, -0.005, 0.0),
-            scale: Vec3::new(189.0, 0.03, 19.6),
+            translation: Vec3::new(0.0, -0.03, -8.0),
+            scale: Vec3::new(300.0, 0.12, 30.0),
             ..default()
         },
-        WaterSheen,
     ));
 
-    for (i, lane) in [-7.4, -4.2, -1.0, 2.4, 5.6, 7.8].iter().enumerate() {
+    // ---- ПЕННЫЕ ВОЛНЫ (накатывают на берег) ----
+    for (i, bz) in [0.6, 1.6, 2.6, 3.8].iter().enumerate() {
         commands.spawn((
             Mesh3d(m_cuboid.clone()),
             MeshMaterial3d(mat_foam.clone()),
             Transform {
-                translation: Vec3::new(0.0, 0.012, *lane),
-                scale: Vec3::new(9.0, 0.02, 0.35),
+                translation: Vec3::new(0.0, 0.02, *bz),
+                scale: Vec3::new(60.0, 0.03, 0.5),
                 ..default()
             },
             Foam {
-                lane: *lane,
-                speed: 1.6 + i as f32 * 0.35,
-                phase: i as f32 * 17.0,
+                base_z: *bz,
+                phase: i as f32 * 1.7,
+                speed: 0.5 + i as f32 * 0.08,
             },
         ));
     }
 
-    // ---- ПЛЯЖИ ----
-    for z in [-18.0, 18.0] {
-        spawn_scaled(
-            &mut commands,
-            m_cuboid.clone(),
-            mat_sand.clone(),
-            Vec3::new(0.0, 0.08, z),
-            Vec3::new(190.0, SAND_TOP, 18.0),
-        );
-        for (dx, dz, r) in [
-            (-26.0, z + 4.0, 5.5),
-            (-12.0, z + 5.5, 4.2),
-            (14.0, z + 4.5, 6.0),
-            (28.0, z + 5.0, 4.8),
-            (40.0, z + 3.0, 5.2),
-        ] {
-            spawn_scaled(
-                &mut commands,
-                m_sphere.clone(),
-                mat_sand_dark.clone(),
-                Vec3::new(dx, SAND_TOP - r * 0.42, dz),
-                Vec3::new(r * 1.9, r * 0.55, r * 1.3),
-            );
-        }
-        let wz = if z > 0.0 { z - 8.4 } else { z + 8.4 };
-        spawn_scaled(
-            &mut commands,
-            m_cuboid.clone(),
-            mat_wet.clone(),
-            Vec3::new(0.0, SAND_TOP + 0.005, wz),
-            Vec3::new(190.0, 0.02, 2.4),
-        );
-    }
-
-    // ---- ГОРЫ ----
-    for (x, y, z, sx, sy, sz, mat) in [
-        (-70.0, -6.0, -70.0, 70.0, 26.0, 40.0, mat_hill.clone()),
-        (-10.0, -8.0, -95.0, 90.0, 34.0, 50.0, mat_hill.clone()),
-        (60.0, -7.0, -80.0, 75.0, 28.0, 44.0, mat_hill_far.clone()),
-        (120.0, -10.0, -110.0, 100.0, 40.0, 60.0, mat_hill_far.clone()),
-        (-140.0, -10.0, -100.0, 95.0, 36.0, 55.0, mat_hill_far.clone()),
+    // ---- ПЛЯЖ (широкий) ----
+    spawn_scaled(&mut commands, m_cuboid.clone(), mat_sand.clone(), Vec3::new(0.0, 0.05, 26.0), Vec3::new(240.0, SAND_TOP, 56.0));
+    // Дюны
+    for (dx, dz, r) in [
+        (-40.0, 36.0, 7.0), (-18.0, 40.0, 5.5), (20.0, 38.0, 7.5),
+        (42.0, 34.0, 6.0), (55.0, 40.0, 5.0), (-55.0, 38.0, 6.5),
     ] {
-        spawn_scaled(
-            &mut commands,
-            m_sphere.clone(),
-            mat,
-            Vec3::new(x, y, z),
-            Vec3::new(sx, sy, sz),
-        );
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_sand_dark.clone(), Vec3::new(dx, SAND_TOP - r * 0.4, dz), Vec3::new(r * 2.0, r * 0.5, r * 1.4));
+    }
+    // Мокрый песок у кромки
+    spawn_scaled(&mut commands, m_cuboid.clone(), mat_wet.clone(), Vec3::new(0.0, SAND_TOP + 0.006, 1.6), Vec3::new(240.0, 0.02, 3.2));
+
+    // ---- ОСТРОВ НА ГОРИЗОНТЕ ----
+    for (x, z, r) in [(-140.0, -360.0, 46.0), (150.0, -380.0, 60.0), (20.0, -400.0, 40.0)] {
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_island.clone(), Vec3::new(x, -r * 0.55, z), Vec3::new(r, r * 0.5, r * 0.7));
     }
 
-    // ---- ДАЛЬНИЙ ЛЕС ----
+    // ---- ДАЛЬНИЙ ЛЕС НА ПЛЯЖЕ ----
     let mut rng: u32 = 1234;
-    for _ in 0..46 {
+    for _ in 0..40 {
         let r1 = next_rand(&mut rng);
         let r2 = next_rand(&mut rng);
-        let x = -85.0 + r1 * 170.0;
-        let z = -33.0 - r2 * 12.0;
+        let x = -80.0 + r1 * 160.0;
+        let z = 34.0 + r2 * 8.0;
         let h = 2.4 + r2 * 2.6;
-        spawn_scaled(
-            &mut commands,
-            m_cyl.clone(),
-            mat_bark.clone(),
-            Vec3::new(x, SAND_TOP + h * 0.5, z),
-            Vec3::new(0.28, h, 0.28),
-        );
-        spawn_scaled(
-            &mut commands,
-            m_sphere.clone(),
-            mat_forest.clone(),
-            Vec3::new(x, SAND_TOP + h + 0.6, z),
-            Vec3::new(2.0 + r1, 1.7 + r2, 2.0 + r2),
-        );
+        spawn_scaled(&mut commands, m_cyl.clone(), mat_bark.clone(), Vec3::new(x, SAND_TOP + h * 0.5, z), Vec3::new(0.28, h, 0.28));
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_forest.clone(), Vec3::new(x, SAND_TOP + h + 0.6, z), Vec3::new(2.0 + r1, 1.7 + r2, 2.0 + r2));
     }
 
     // ---- ПАЛЬМЫ ----
     let mut obstacles: Vec<(f32, f32, f32)> = vec![];
     for (x, z, lean, height) in [
-        (-3.4, 14.2, 0.055, 5.4),
-        (3.4, 14.2, -0.055, 5.4),
-        (-9.5, 18.5, 0.10, 6.2),
-        (10.5, 17.0, -0.11, 6.6),
-        (-18.0, 21.0, 0.07, 5.8),
-        (19.0, 22.0, -0.08, 6.0),
-        (-27.0, 16.0, 0.12, 5.2),
-        (-6.0, -19.5, 0.06, 5.6),
-        (13.0, -20.5, -0.09, 6.0),
+        (-3.2, 10.0, 0.055, 5.4), (3.2, 10.0, -0.055, 5.4),
+        (-12.0, 14.0, 0.10, 6.2), (14.0, 12.0, -0.11, 6.6),
+        (-22.0, 18.0, 0.07, 5.8), (24.0, 20.0, -0.08, 6.0),
+        (-34.0, 15.0, 0.12, 5.2), (-8.0, 26.0, 0.06, 5.6),
+        (18.0, 27.0, -0.09, 6.0), (30.0, 16.0, 0.05, 5.4),
     ] {
-        spawn_palm(
-            &mut commands,
-            &m_cuboid,
-            &m_sphere,
-            &mat_bark,
-            &mat_frond,
-            &mat_frond_dry,
-            &mat_coco,
-            Vec3::new(x, SAND_TOP, z),
-            lean,
-            height,
-        );
+        spawn_palm(&mut commands, &m_cuboid, &m_sphere, &mat_bark, &mat_frond, &mat_coco, Vec3::new(x, SAND_TOP, z), lean, height);
         obstacles.push((x, z, 0.55));
     }
 
     // ---- ГАМАК + ПЕРСОНАЖ ----
-    let left = Vec3::new(-3.4, SAND_TOP, 14.2);
-    let right = Vec3::new(3.4, SAND_TOP, 14.2);
-    spawn_hammock(
-        &mut commands,
-        &m_cuboid,
-        &m_cyl,
-        &mat_cloth,
-        &mat_cloth2,
-        &mat_rope,
-        left,
-        right,
-    );
-    spawn_character(
-        &mut commands,
-        &m_sphere,
-        &m_cuboid,
-        &m_cyl,
-        &mat_skin,
-        &mat_shirt,
-        &mat_shorts,
-        &mat_hat,
-    );
+    let left = Vec3::new(-3.2, SAND_TOP, 10.0);
+    let right = Vec3::new(3.2, SAND_TOP, 10.0);
+    spawn_hammock(&mut commands, &m_cuboid, &m_cyl, &mat_cloth, &mat_cloth2, &mat_rope, left, right);
+    spawn_character(&mut commands, &m_sphere, &m_cuboid, &m_cyl, &mat_skin, &mat_shirt, &mat_shorts, &mat_hat);
 
-    // ---- СТОЛИК + ЗОНТИК ----
-    let table = Vec3::new(2.4, SAND_TOP, 16.4);
-    spawn_scaled(
-        &mut commands,
-        m_cyl.clone(),
-        mat_wood.clone(),
-        table + Vec3::Y * 0.28,
-        Vec3::new(0.1, 0.56, 0.1),
-    );
-    spawn_scaled(
-        &mut commands,
-        m_cyl.clone(),
-        mat_wood.clone(),
-        table + Vec3::Y * 0.58,
-        Vec3::new(0.42, 0.05, 0.42),
-    );
-    obstacles.push((table.x, table.z, 0.55));
+    // ---- БАР-СТОЙКА ----
+    spawn_bar(&mut commands, &m_cuboid, &m_cyl, &m_sphere, &mat_wood, &mat_wood_dark, &mat_canopy, &mat_board, &mat_lemonade, &mat_coffee);
+    obstacles.push((BAR_POS.x, BAR_POS.z, 1.9));
 
-    let umb = Vec3::new(-2.6, SAND_TOP, 17.6);
-    spawn_scaled(
-        &mut commands,
-        m_cyl.clone(),
-        mat_wood.clone(),
-        umb + Vec3::new(0.12, 1.05, 0.0),
-        Vec3::new(0.035, 2.1, 0.035),
-    );
-    spawn_scaled(
-        &mut commands,
-        m_sphere.clone(),
-        mat_canopy.clone(),
-        umb + Vec3::new(0.24, 1.98, 0.0),
-        Vec3::new(2.4, 0.75, 2.4),
-    );
+    // ---- ЗОНТИК + ПОЛОТЕНЦЕ près гамака ----
+    let umb = Vec3::new(-7.0, SAND_TOP, 13.0);
+    spawn_scaled(&mut commands, m_cyl.clone(), mat_wood.clone(), umb + Vec3::new(0.12, 1.05, 0.0), Vec3::new(0.035, 2.1, 0.035));
+    spawn_scaled(&mut commands, m_sphere.clone(), mat_canopy.clone(), umb + Vec3::new(0.24, 1.98, 0.0), Vec3::new(2.6, 0.8, 2.6));
     obstacles.push((umb.x, umb.z, 0.4));
+    // Полотенце
+    spawn_scaled(&mut commands, m_cuboid.clone(), mat_cloth.clone(), Vec3::new(-7.0, SAND_TOP + 0.03, 15.0), Vec3::new(1.6, 0.03, 2.6));
 
-    // ---- ЛИМОНАД + АКСЕССУАРЫ ----
-    let drink_rest = Vec3::new(-0.62, 0.98, 14.52);
-    let drink_mouth = Vec3::new(-1.36, 1.0, 13.9);
-    let drink_walk = table + Vec3::Y * 0.72;
-
-    commands.spawn((
-        Mesh3d(m_cyl.clone()),
-        MeshMaterial3d(mat_lemon.clone()),
-        Transform::from_translation(drink_rest),
-        Drink {
-            rest: drink_rest,
-            mouth: drink_mouth,
-            walk: drink_walk,
-        },
-    ));
-
-    for (offset, rot, mesh, mat, scale) in [
-        (
-            Vec3::new(0.02, 0.09, 0.015),
-            Quat::from_rotation_y(0.6),
-            m_cuboid.clone(),
-            mat_ice.clone(),
-            Vec3::new(0.05, 0.05, 0.05),
-        ),
-        (
-            Vec3::new(-0.03, 0.085, -0.02),
-            Quat::from_rotation_y(1.9),
-            m_cuboid.clone(),
-            mat_ice.clone(),
-            Vec3::new(0.045, 0.045, 0.045),
-        ),
-        (
-            Vec3::new(0.075, 0.15, 0.0),
-            Quat::from_rotation_z(-0.4),
-            m_sphere.clone(),
-            mat_lemon.clone(),
-            Vec3::new(0.09, 0.03, 0.09),
-        ),
-        (
-            Vec3::new(-0.012, 0.24, 0.01),
-            Quat::from_rotation_z(0.22),
-            m_cyl.clone(),
-            mat_straw.clone(),
-            Vec3::new(0.014, 0.34, 0.014),
-        ),
-    ] {
-        commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(mat),
-            Transform {
-                translation: drink_rest + offset,
-                rotation: rot,
-                scale,
-            },
-            Accessory { offset, rot },
-        ));
-    }
-
-    // ---- ДЕКОР ----
+    // ---- ДЕКОР: камни, кусты, ракушки ----
     for (x, z, r, sy) in [
-        (-6.5, 12.2, 0.75, 0.5),
-        (-5.2, 11.4, 0.45, 0.35),
-        (7.8, 13.0, 0.9, 0.55),
-        (9.4, 12.1, 0.5, 0.32),
-        (-14.5, 13.5, 1.1, 0.6),
-        (16.0, 20.0, 0.8, 0.45),
-        (-22.0, 19.0, 1.0, 0.5),
-        (4.5, -13.0, 0.9, 0.5),
-        (-9.0, -12.4, 0.6, 0.38),
+        (-14.0, 8.0, 0.9, 0.5), (-12.5, 7.2, 0.5, 0.35),
+        (16.0, 9.0, 1.0, 0.55), (18.0, 8.2, 0.55, 0.32),
+        (-28.0, 12.0, 1.2, 0.6), (28.0, 14.0, 0.9, 0.45),
+        (6.0, 24.0, 0.8, 0.4), (-20.0, 26.0, 1.0, 0.5),
     ] {
-        spawn_scaled(
-            &mut commands,
-            m_sphere.clone(),
-            mat_rock.clone(),
-            Vec3::new(x, SAND_TOP - r * sy * 0.6, z),
-            Vec3::new(r, r * sy, r * 0.85),
-        );
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_rock.clone(), Vec3::new(x, SAND_TOP - r * sy * 0.6, z), Vec3::new(r, r * sy, r * 0.85));
         obstacles.push((x, z, r * 0.9));
     }
-
-    for _ in 0..22 {
-        let r1 = next_rand(&mut rng);
-        let r2 = next_rand(&mut rng);
-        let x = -30.0 + r1 * 60.0;
-        let z = if r2 > 0.5 {
-            11.5 + r1 * 12.0
-        } else {
-            -11.5 - r1 * 12.0
-        };
-        spawn_scaled(
-            &mut commands,
-            m_sphere.clone(),
-            mat_shell.clone(),
-            Vec3::new(x, SAND_TOP + 0.02, z),
-            Vec3::new(0.12 + r2 * 0.08, 0.06, 0.1 + r1 * 0.06),
-        );
-    }
-
-    for (x, z, ry, len) in [
-        (-11.0, 12.8, 0.7, 4.2),
-        (12.5, 14.5, -0.4, 3.4),
-        (-3.0, -12.6, 1.2, 3.8),
-    ] {
-        commands.spawn((
-            Mesh3d(m_cyl.clone()),
-            MeshMaterial3d(mat_wood.clone()),
-            Transform {
-                translation: Vec3::new(x, SAND_TOP + 0.16, z),
-                rotation: Quat::from_rotation_y(ry) * Quat::from_rotation_z(PI / 2.0),
-                scale: Vec3::new(0.16, len, 0.16),
-            },
-        ));
-        obstacles.push((x, z, len * 0.3));
-    }
-
     for (x, z, r) in [
-        (-16.0, 17.5, 1.3),
-        (-13.5, 19.0, 0.9),
-        (17.5, 18.5, 1.2),
-        (21.0, 16.0, 0.8),
-        (-25.0, 20.5, 1.1),
-        (8.0, -17.0, 1.0),
+        (-18.0, 22.0, 1.3), (-15.0, 24.0, 0.9),
+        (22.0, 23.0, 1.2), (26.0, 20.0, 0.8),
+        (-32.0, 24.0, 1.1), (10.0, 28.0, 1.0),
     ] {
-        spawn_scaled(
-            &mut commands,
-            m_sphere.clone(),
-            mat_bush.clone(),
-            Vec3::new(x, SAND_TOP + r * 0.25, z),
-            Vec3::new(r * 1.4, r * 0.8, r * 1.3),
-        );
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_bush.clone(), Vec3::new(x, SAND_TOP + r * 0.25, z), Vec3::new(r * 1.4, r * 0.8, r * 1.3));
         obstacles.push((x, z, r * 0.8));
     }
+    for _ in 0..26 {
+        let r1 = next_rand(&mut rng);
+        let r2 = next_rand(&mut rng);
+        let x = -40.0 + r1 * 80.0;
+        let z = 4.0 + r2 * 30.0;
+        spawn_scaled(&mut commands, m_sphere.clone(), mat_sand_dark.clone(), Vec3::new(x, SAND_TOP + 0.02, z), Vec3::new(0.12 + r2 * 0.08, 0.05, 0.1 + r1 * 0.06));
+    }
 
-    spawn_scaled(
-        &mut commands,
-        m_sphere.clone(),
-        mat_ball.clone(),
-        Vec3::new(1.2, SAND_TOP + 0.17, 18.6),
-        Vec3::new(0.34, 0.34, 0.34),
-    );
+    // ---- НЕБО: солнце + гало ----
+    spawn_scaled(&mut commands, m_sphere.clone(), mat_sun.clone(), SUN_POS, Vec3::new(16.0, 16.0, 16.0));
+    spawn_scaled(&mut commands, m_sphere.clone(), mat_halo.clone(), SUN_POS * 0.995, Vec3::new(42.0, 42.0, 42.0));
 
-    // ---- НЕБО ----
-    spawn_scaled(
-        &mut commands,
-        m_sphere.clone(),
-        mat_sun.clone(),
-        SUN_POS,
-        Vec3::new(13.0, 13.0, 13.0),
-    );
-    spawn_scaled(
-        &mut commands,
-        m_sphere.clone(),
-        mat_halo.clone(),
-        SUN_POS * 0.995,
-        Vec3::new(34.0, 34.0, 34.0),
-    );
-
+    // ---- ОБЛАКА (большие, медленные) ----
     for (_i, (x, y, z, s)) in [
-        (-60.0, 30.0, -70.0, 1.0),
-        (-15.0, 36.0, -95.0, 1.4),
-        (45.0, 28.0, -60.0, 0.9),
-        (95.0, 34.0, -100.0, 1.6),
-        (-110.0, 32.0, -40.0, 1.2),
-        (10.0, 40.0, 40.0, 1.5),
-        (-70.0, 38.0, 60.0, 1.1),
-        (80.0, 31.0, 75.0, 1.3),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+        (-80.0, 34.0, -90.0, 1.2), (-20.0, 40.0, -140.0, 1.6),
+        (60.0, 32.0, -80.0, 1.0), (130.0, 38.0, -150.0, 1.7),
+        (-150.0, 36.0, -60.0, 1.3), (20.0, 44.0, 60.0, 1.5),
+        (-90.0, 42.0, 80.0, 1.2), (110.0, 34.0, 100.0, 1.4),
+    ].into_iter().enumerate() {
         for (dx, dy, dz, r) in [
-            (0.0, 0.0, 0.0, 7.0),
-            (6.5, -0.8, 1.5, 5.0),
-            (-6.0, -1.0, -1.0, 5.5),
-            (3.0, 1.6, -2.5, 4.2),
-            (-3.5, 1.2, 2.5, 4.6),
-            (10.5, -1.4, 0.5, 3.6),
+            (0.0, 0.0, 0.0, 7.0), (6.5, -0.8, 1.5, 5.0),
+            (-6.0, -1.0, -1.0, 5.5), (3.0, 1.6, -2.5, 4.2),
+            (-3.5, 1.2, 2.5, 4.6), (10.5, -1.4, 0.5, 3.6),
         ] {
             commands.spawn((
                 Mesh3d(m_sphere.clone()),
@@ -786,22 +566,17 @@ fn setup(
                     scale: Vec3::new(r * s, r * s * 0.45, r * s * 0.8),
                     ..default()
                 },
-                CloudPuff,
+                CloudPuff { speed: 0.012 + next_rand(&mut rng) * 0.02 },
             ));
         }
     }
 
-    // ---- ПТИЦЫ ----
+    // ---- ЧАЙКИ над океаном ----
     for (i, (cx, cz, rad, h)) in [
-        (0.0, -18.0, 22.0, 14.0),
-        (12.0, -6.0, 16.0, 17.0),
-        (-16.0, -22.0, 26.0, 12.0),
-        (5.0, 8.0, 19.0, 20.0),
-        (-8.0, -2.0, 14.0, 16.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+        (0.0, -30.0, 30.0, 16.0), (20.0, -15.0, 22.0, 19.0),
+        (-25.0, -35.0, 34.0, 14.0), (8.0, -5.0, 26.0, 22.0),
+        (-12.0, -12.0, 18.0, 18.0),
+    ].into_iter().enumerate() {
         for k in 0..3 {
             commands.spawn((
                 Mesh3d(m_sphere.clone()),
@@ -814,7 +589,7 @@ fn setup(
                 Bird {
                     center: Vec3::new(cx, 0.0, cz),
                     radius: rad,
-                    speed: 0.22 + i as f32 * 0.03,
+                    speed: 0.08 + i as f32 * 0.012,
                     phase: k as f32 * 0.5 + i as f32 * 1.3,
                     height: h,
                 },
@@ -822,28 +597,102 @@ fn setup(
         }
     }
 
-    // ---- ПЫЛИНКИ ----
-    for _ in 0..70 {
+    // ---- ЯХТЫ в океане ----
+    spawn_yacht(&mut commands, &m_cuboid, &m_cyl, &m_sphere, &mat_wood_dark, &mat_cloth2, Vec3::new(-30.0, 0.0, -60.0), 0.0);
+    spawn_yacht(&mut commands, &m_cuboid, &m_cyl, &m_sphere, &mat_wood_dark, &mat_cloth, Vec3::new(40.0, 0.0, -90.0), 1.5);
+
+    // ---- СОЛНЕЧНЫЕ ЗАЙЧИКИ на воде ----
+    for _ in 0..46 {
         let r1 = next_rand(&mut rng);
         let r2 = next_rand(&mut rng);
-        let r3 = next_rand(&mut rng);
-        let base = Vec3::new(-24.0 + r1 * 48.0, 0.6 + r2 * 6.0, -14.0 + r3 * 34.0);
+        let x = -60.0 + r1 * 120.0;
+        let z = -4.0 - r2 * 60.0;
         commands.spawn((
             Mesh3d(m_sphere.clone()),
-            MeshMaterial3d(mat_mote.clone()),
+            MeshMaterial3d(mat_sparkle.clone()),
             Transform {
-                translation: base,
-                scale: Vec3::splat(0.022 + r3 * 0.02),
+                translation: Vec3::new(x, 0.02, z),
+                scale: Vec3::splat(0.12),
                 ..default()
             },
-            Mote {
-                base,
-                phase: r1 * 12.0,
-                radius: 0.4 + r2 * 1.4,
-                speed: 0.25 + r3 * 0.5,
-            },
+            Sparkle { phase: r1 * 12.0 },
         ));
     }
+
+    // ---- НАПИТКИ В КАРМАНЕ (два: лимонад и кофе) ----
+    let hand_start = Vec3::new(0.0, -5.0, 0.0); // спрятаны, пока не достанешь
+
+    // ЛИМОНАД (большой, без кружки)
+    commands.spawn((
+        Transform::from_translation(hand_start),
+        Visibility::default(),
+        DrinkGroup { kind: DrinkKind::Lemonade },
+        DrinkScale { current: 0.0 },
+    )).with_children(|parent| {
+        // Большая порция лимонада
+        parent.spawn((
+            Mesh3d(m_cyl.clone()),
+            MeshMaterial3d(mat_lemonade.clone()),
+            Transform { translation: Vec3::ZERO, scale: Vec3::new(0.24, 0.8, 0.24), ..default() },
+        ));
+        // Долька лимона сверху
+        parent.spawn((
+            Mesh3d(m_sphere.clone()),
+            MeshMaterial3d(mat_lemon.clone()),
+            Transform { translation: Vec3::new(0.0, 0.42, 0.0), scale: Vec3::new(0.3, 0.1, 0.3), rotation: Quat::from_rotation_z(0.3), ..default() },
+        ));
+        // Долька сбоку
+        parent.spawn((
+            Mesh3d(m_sphere.clone()),
+            MeshMaterial3d(mat_lemon.clone()),
+            Transform { translation: Vec3::new(0.22, 0.12, 0.0), scale: Vec3::new(0.16, 0.05, 0.16), ..default() },
+        ));
+        // Трубочка
+        parent.spawn((
+            Mesh3d(m_cyl.clone()),
+            MeshMaterial3d(mat_straw.clone()),
+            Transform { translation: Vec3::new(0.07, 0.55, 0.0), scale: Vec3::new(0.03, 0.7, 0.03), rotation: Quat::from_rotation_z(-0.18), ..default() },
+        ));
+    });
+
+    // КОФЕ (в кружке, с паром)
+    commands.spawn((
+        Transform::from_translation(hand_start),
+        Visibility::default(),
+        DrinkGroup { kind: DrinkKind::Coffee },
+        DrinkScale { current: 0.0 },
+    )).with_children(|parent| {
+        // Кружка
+        parent.spawn((
+            Mesh3d(m_cyl.clone()),
+            MeshMaterial3d(mat_mug.clone()),
+            Transform { translation: Vec3::ZERO, scale: Vec3::new(0.2, 0.36, 0.2), ..default() },
+        ));
+        // Кофе сверху
+        parent.spawn((
+            Mesh3d(m_cyl.clone()),
+            MeshMaterial3d(mat_coffee.clone()),
+            Transform { translation: Vec3::new(0.0, 0.17, 0.0), scale: Vec3::new(0.18, 0.03, 0.18), ..default() },
+        ));
+        // Ручка кружки (из маленьких сфер по дуге)
+        for i in 0..5 {
+            let a = -0.9 + i as f32 * 0.45;
+            parent.spawn((
+                Mesh3d(m_sphere.clone()),
+                MeshMaterial3d(mat_mug.clone()),
+                Transform { translation: Vec3::new(0.22 + a.cos() * 0.08, a.sin() * 0.11, 0.0), scale: Vec3::splat(0.045), ..default() },
+            ));
+        }
+        // Пар
+        for i in 0..3 {
+            parent.spawn((
+                Mesh3d(m_sphere.clone()),
+                MeshMaterial3d(mat_steam.clone()),
+                Transform { translation: Vec3::new((i as f32 - 1.0) * 0.06, 0.3, 0.0), scale: Vec3::splat(0.05), ..default() },
+                Steam { base: Vec3::new((i as f32 - 1.0) * 0.06, 0.3, 0.0), phase: i as f32 * 0.4 },
+            ));
+        }
+    });
 
     commands.insert_resource(Obstacles(obstacles));
 }
@@ -859,11 +708,7 @@ fn spawn_scaled(
     commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform {
-            translation,
-            scale,
-            ..default()
-        },
+        Transform { translation, scale, ..default() },
     ));
 }
 
@@ -877,9 +722,7 @@ fn spawn_beam(
 ) {
     let dir = end - start;
     let len = dir.length();
-    if len <= f32::EPSILON {
-        return;
-    }
+    if len <= f32::EPSILON { return; }
     commands.spawn((
         Mesh3d(mesh.clone()),
         MeshMaterial3d(material.clone()),
@@ -897,7 +740,6 @@ fn spawn_palm(
     m_sphere: &Handle<Mesh>,
     mat_bark: &Handle<StandardMaterial>,
     mat_frond: &Handle<StandardMaterial>,
-    mat_frond_dry: &Handle<StandardMaterial>,
     mat_coco: &Handle<StandardMaterial>,
     pos: Vec3,
     lean: f32,
@@ -942,19 +784,15 @@ fn spawn_palm(
         let len = 2.6 + (i % 4) as f32 * 0.35;
         let base_rot = Quat::from_rotation_y(a) * Quat::from_rotation_x(droop);
         let offset = base_rot * Vec3::new(0.0, 0.12, -len * 0.5);
-        let mat = if i % 4 == 0 { mat_frond_dry } else { mat_frond };
         commands.spawn((
             Mesh3d(m_sphere.clone()),
-            MeshMaterial3d(mat.clone()),
+            MeshMaterial3d(mat_frond.clone()),
             Transform {
                 translation: cur + offset,
                 rotation: base_rot,
                 scale: Vec3::new(0.5, 0.07, len),
             },
-            Frond {
-                base_rot,
-                phase: i as f32 * 0.9 + pos.x,
-            },
+            Sway { base: cur + offset, base_rot, phase: i as f32 * 0.9 + pos.x },
         ));
     }
 }
@@ -986,31 +824,13 @@ fn spawn_hammock(
                 scale: Vec3::new(len, 0.07, 0.95),
                 ..default()
             },
-            Sway {
-                base: Vec3::new(x, y, z),
-                base_rot: Quat::IDENTITY,
-                phase: 0.0,
-            },
+            Sway { base: Vec3::new(x, y, z), base_rot: Quat::IDENTITY, phase: 0.0 },
         ));
     }
 
     for dz in [-0.42, -0.14, 0.14, 0.42] {
-        spawn_beam(
-            commands,
-            m_cuboid,
-            mat_rope,
-            anchor_l,
-            Vec3::new(-2.72, 0.72, z + dz * 0.8),
-            0.028,
-        );
-        spawn_beam(
-            commands,
-            m_cuboid,
-            mat_rope,
-            anchor_r,
-            Vec3::new(2.72, 0.72, z + dz * 0.8),
-            0.028,
-        );
+        spawn_beam(commands, m_cuboid, mat_rope, anchor_l, Vec3::new(-2.72, 0.72, z + dz * 0.8), 0.028);
+        spawn_beam(commands, m_cuboid, mat_rope, anchor_r, Vec3::new(2.72, 0.72, z + dz * 0.8), 0.028);
     }
 
     for x in [-2.68, 2.68] {
@@ -1038,7 +858,7 @@ fn spawn_character(
     mat_shorts: &Handle<StandardMaterial>,
     mat_hat: &Handle<StandardMaterial>,
 ) {
-    let z = 14.2;
+    let z = 10.0;
 
     let parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>, Vec3, Vec3, Quat)> = vec![
         (m_sphere.clone(), mat_skin.clone(), Vec3::new(-2.02, 0.9, z), Vec3::new(0.38, 0.42, 0.38), Quat::IDENTITY),
@@ -1058,30 +878,163 @@ fn spawn_character(
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(mat),
-            Transform {
-                translation: pos,
-                rotation: rot,
-                scale,
-            },
-            Sway {
-                base: pos,
-                base_rot: rot,
-                phase: 0.0,
-            },
+            Transform { translation: pos, rotation: rot, scale, ..default() },
+            Sway { base: pos, base_rot: rot, phase: 0.0 },
         ));
     }
 }
 
+fn spawn_bar(
+    commands: &mut Commands,
+    m_cuboid: &Handle<Mesh>,
+    m_cyl: &Handle<Mesh>,
+    m_sphere: &Handle<Mesh>,
+    mat_wood: &Handle<StandardMaterial>,
+    mat_wood_dark: &Handle<StandardMaterial>,
+    mat_canopy: &Handle<StandardMaterial>,
+    mat_board: &Handle<StandardMaterial>,
+    mat_lemonade: &Handle<StandardMaterial>,
+    mat_coffee: &Handle<StandardMaterial>,
+) {
+    // Стойка (прилавок)
+    commands.spawn((
+        Mesh3d(m_cuboid.clone()),
+        MeshMaterial3d(mat_wood.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.0, 0.55, 0.0),
+            scale: Vec3::new(3.4, 1.1, 1.0),
+            ..default()
+        },
+    ));
+    // Столешница
+    commands.spawn((
+        Mesh3d(m_cuboid.clone()),
+        MeshMaterial3d(mat_wood_dark.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.0, 1.12, 0.0),
+            scale: Vec3::new(3.7, 0.08, 1.2),
+            ..default()
+        },
+    ));
+    // Большой зонт-крыша
+    commands.spawn((
+        Mesh3d(m_cyl.clone()),
+        MeshMaterial3d(mat_wood.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.0, 1.6, -0.6),
+            scale: Vec3::new(0.06, 3.2, 0.06),
+            ..default()
+        },
+    ));
+    commands.spawn((
+        Mesh3d(m_sphere.clone()),
+        MeshMaterial3d(mat_canopy.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.0, 3.1, -0.6),
+            scale: Vec3::new(4.6, 1.2, 4.6),
+            ..default()
+        },
+    ));
+    // Меню-доска
+    commands.spawn((
+        Mesh3d(m_cuboid.clone()),
+        MeshMaterial3d(mat_board.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.0, 1.8, 0.6),
+            scale: Vec3::new(2.2, 1.0, 0.06),
+            ..default()
+        },
+    ));
+    // Табуретки
+    for dx in [-1.2, 1.2] {
+        commands.spawn((
+            Mesh3d(m_cyl.clone()),
+            MeshMaterial3d(mat_wood_dark.clone()),
+            Transform {
+                translation: BAR_POS + Vec3::new(dx, 0.35, 1.4),
+                scale: Vec3::new(0.35, 0.7, 0.35),
+                ..default()
+            },
+        ));
+    }
+    // Индикаторы выбора напитка (жёлтый = лимонад, коричневый = кофе)
+    commands.spawn((
+        Mesh3d(m_sphere.clone()),
+        MeshMaterial3d(mat_lemonade.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(-0.7, 1.45, 0.0),
+            scale: Vec3::splat(0.22),
+            ..default()
+        },
+        BarIndicator { kind: DrinkKind::Lemonade },
+    ));
+    commands.spawn((
+        Mesh3d(m_sphere.clone()),
+        MeshMaterial3d(mat_coffee.clone()),
+        Transform {
+            translation: BAR_POS + Vec3::new(0.7, 1.45, 0.0),
+            scale: Vec3::splat(0.0), // кофе не выбран по умолчанию
+            ..default()
+        },
+        BarIndicator { kind: DrinkKind::Coffee },
+    ));
+}
+
+fn spawn_yacht(
+    commands: &mut Commands,
+    m_cuboid: &Handle<Mesh>,
+    m_cyl: &Handle<Mesh>,
+    m_sphere: &Handle<Mesh>,
+    mat_hull: &Handle<StandardMaterial>,
+    mat_sail: &Handle<StandardMaterial>,
+    pos: Vec3,
+    phase: f32,
+) {
+    // Корпус
+    commands.spawn((
+        Mesh3d(m_sphere.clone()),
+        MeshMaterial3d(mat_hull.clone()),
+        Transform {
+            translation: pos,
+            scale: Vec3::new(3.4, 0.9, 1.4),
+            ..default()
+        },
+        Yacht { base: pos, phase },
+    ));
+    // Мачта
+    commands.spawn((
+        Mesh3d(m_cyl.clone()),
+        MeshMaterial3d(mat_hull.clone()),
+        Transform {
+            translation: pos + Vec3::new(0.0, 2.6, 0.0),
+            scale: Vec3::new(0.08, 5.2, 0.08),
+            ..default()
+        },
+        Yacht { base: pos + Vec3::new(0.0, 2.6, 0.0), phase },
+    ));
+    // Парус
+    commands.spawn((
+        Mesh3d(m_cuboid.clone()),
+        MeshMaterial3d(mat_sail.clone()),
+        Transform {
+            translation: pos + Vec3::new(0.5, 3.2, 0.0),
+            scale: Vec3::new(0.06, 4.0, 2.2),
+            ..default()
+        },
+        Yacht { base: pos + Vec3::new(0.5, 3.2, 0.0), phase },
+    ));
+    let _ = m_cuboid;
+}
+
 // ---------- СИСТЕМЫ ----------
 fn ground_height(z: f32) -> f32 {
-    let az = z.abs();
-    if az <= 9.4 {
-        0.0
-    } else if az >= 11.8 {
+    if z >= 1.0 {
         SAND_TOP
+    } else if z <= -1.0 {
+        WATER_Y
     } else {
-        let t = (az - 9.4) / 2.4;
-        t * SAND_TOP
+        let t = (z + 1.0) / 2.0;
+        WATER_Y + t * (SAND_TOP - WATER_Y)
     }
 }
 
@@ -1091,7 +1044,7 @@ fn camera_control(
     mut mouse: MessageReader<MouseMotion>,
     mut mode: ResMut<RelaxMode>,
     mut cursor: Single<&mut CursorOptions>,
-    mut cam: Single<(&mut Transform, &mut Player), With<Camera>>,
+    cam: Single<(&mut Transform, &mut Player)>,
     obstacles: Res<Obstacles>,
 ) {
     let dt = time.delta_secs().min(0.05);
@@ -1099,18 +1052,14 @@ fn camera_control(
     let (mut tf, mut player) = cam.into_inner();
 
     if keys.just_pressed(KeyCode::KeyE) {
-        *mode = if *mode == RelaxMode::Resting {
-            RelaxMode::Walking
-        } else {
-            RelaxMode::Resting
-        };
+        *mode = if *mode == RelaxMode::Resting { RelaxMode::Walking } else { RelaxMode::Resting };
         match *mode {
             RelaxMode::Walking => {
                 cursor.grab_mode = CursorGrabMode::Locked;
                 cursor.visible = false;
-                tf.translation = Vec3::new(1.4, ground_height(17.4) + EYE, 17.4);
-                player.yaw = PI * 0.02;
-                player.pitch = -0.04;
+                tf.translation = Vec3::new(0.0, ground_height(14.0) + EYE, 14.0);
+                player.yaw = 0.0;
+                player.pitch = -0.03;
                 player.bob = 0.0;
             }
             RelaxMode::Resting => {
@@ -1130,7 +1079,7 @@ fn camera_control(
                 player.pitch = (player.pitch - ev.delta.y * 0.0022).clamp(-1.35, 1.35);
             }
             RelaxMode::Resting => {
-                player.yaw = (player.yaw - ev.delta.x * 0.0012).clamp(-0.8, 0.8);
+                player.yaw = (player.yaw - ev.delta.x * 0.0012).clamp(-0.9, 0.9);
                 player.pitch = (player.pitch - ev.delta.y * 0.001).clamp(-0.5, 0.6);
             }
         }
@@ -1140,26 +1089,18 @@ fn camera_control(
         RelaxMode::Resting => {
             let a = (t * 1.15).sin();
             let b = (t * 0.78).cos();
-            tf.translation = Vec3::new(-1.9, 1.12 + a * 0.018, 13.92 + b * 0.012);
+            tf.translation = Vec3::new(-1.0, 1.15 + a * 0.018, 10.0 + b * 0.012);
             tf.rotation = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, b * 0.014);
         }
         RelaxMode::Walking => {
             let mut input = Vec2::ZERO;
-            if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-                input.y += 1.0;
-            }
-            if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-                input.y -= 1.0;
-            }
-            if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-                input.x += 1.0;
-            }
-            if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-                input.x -= 1.0;
-            }
+            if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) { input.y += 1.0; }
+            if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) { input.y -= 1.0; }
+            if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) { input.x += 1.0; }
+            if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) { input.x -= 1.0; }
 
             let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-            let speed = if sprint { 5.8 } else { 3.1 };
+            let speed = if sprint { 6.2 } else { 3.4 };
 
             if input.length_squared() > 0.001 {
                 let fwd = Vec3::new(-player.yaw.sin(), 0.0, -player.yaw.cos());
@@ -1169,10 +1110,7 @@ fn camera_control(
                 let mut next = tf.translation + step;
 
                 next.x = next.x.clamp(-WORLD_X, WORLD_X);
-                next.z = next.z.clamp(-WORLD_Z, WORLD_Z);
-                if next.z.abs() < RIVER_EDGE {
-                    next.z = if next.z < 0.0 { -RIVER_EDGE } else { RIVER_EDGE };
-                }
+                next.z = next.z.clamp(BEACH_MIN_Z, BEACH_MAX_Z);
                 for &(ox, oz, r) in obstacles.0.iter() {
                     let d = Vec2::new(next.x - ox, next.z - oz);
                     let len = d.length();
@@ -1198,6 +1136,72 @@ fn camera_control(
     }
 }
 
+fn drink_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut state: ResMut<DrinkState>,
+) {
+    if keys.just_pressed(KeyCode::Space) {
+        state.holding = !state.holding;
+        if state.holding {
+            println!("Достал напиток: {:?}", state.selected);
+        } else {
+            println!("Убрал напиток в карман");
+        }
+    }
+    if keys.just_pressed(KeyCode::Digit1) {
+        state.selected = DrinkKind::Lemonade;
+        println!("Выбран ЛИМОНАД");
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        state.selected = DrinkKind::Coffee;
+        println!("Выбран КОФЕ");
+    }
+}
+
+fn drink_animation(
+    time: Res<Time>,
+    state: Res<DrinkState>,
+    cam: Single<&Transform, (With<Player>, Without<DrinkGroup>)>,
+    mut q: Query<(&mut Transform, &mut DrinkScale, &DrinkGroup), Without<Player>>,
+) {
+    let dt = time.delta_secs().min(0.05);
+    let alpha = (dt * 6.0).min(1.0);
+    let t = time.elapsed_secs();
+
+    let cam_tf = cam.into_inner();
+    // Позиция "в руке" — справа-снизу перед камерой
+    let hand_local = Vec3::new(0.55, -0.5, -1.15);
+    let hand_world = cam_tf.translation + cam_tf.rotation * hand_local;
+
+    for (mut tf, mut ds, dg) in q.iter_mut() {
+        let target = if state.holding && dg.kind == state.selected { 1.0 } else { 0.0 };
+        ds.current = ds.current.lerp(target, alpha);
+
+        if ds.current > 0.01 {
+            // Покачивание в руке
+            let sway = Vec3::new((t * 1.4).sin() * 0.02, (t * 2.0).cos() * 0.015, 0.0);
+            tf.translation = hand_world + sway;
+            tf.rotation = cam_tf.rotation * Quat::from_rotation_z((t * 1.0).sin() * 0.06);
+        } else {
+            tf.translation = Vec3::new(0.0, -5.0, 0.0);
+        }
+        tf.scale = Vec3::splat(ds.current.max(0.0001));
+    }
+}
+
+fn bar_indicator_system(
+    state: Res<DrinkState>,
+    mut q: Query<(&mut Transform, &BarIndicator)>,
+) {
+    for (mut tf, ind) in q.iter_mut() {
+        let on = ind.kind == state.selected;
+        let target = if on { 0.22 } else { 0.0 };
+        tf.scale.x = tf.scale.x.lerp(target, 0.15);
+        tf.scale.y = tf.scale.y.lerp(target, 0.15);
+        tf.scale.z = tf.scale.z.lerp(target, 0.15);
+    }
+}
+
 fn sway_system(time: Res<Time>, mut q: Query<(&mut Transform, &Sway)>) {
     let t = time.elapsed_secs();
     for (mut tf, s) in q.iter_mut() {
@@ -1208,66 +1212,49 @@ fn sway_system(time: Res<Time>, mut q: Query<(&mut Transform, &Sway)>) {
     }
 }
 
-fn frond_system(time: Res<Time>, mut q: Query<(&mut Transform, &Frond)>) {
-    let t = time.elapsed_secs();
-    for (mut tf, f) in q.iter_mut() {
-        let a = (t * 1.7 + f.phase).sin();
-        let b = (t * 1.1 + f.phase * 0.6).cos();
-        tf.rotation = f.base_rot * Quat::from_rotation_z(a * 0.055) * Quat::from_rotation_x(b * 0.03);
-    }
-}
-
-fn water_system(time: Res<Time>, mut q: Query<&mut Transform, With<Water>>) {
+fn water_system(time: Res<Time>, mut q: Query<&mut Transform, With<Ocean>>) {
     let t = time.elapsed_secs();
     for mut tf in q.iter_mut() {
-        tf.translation.y = -0.05 + (t * 0.7).sin() * 0.012;
-        tf.scale.z = 20.0 + (t * 0.35).sin() * 0.25;
-    }
-}
-
-fn sheen_system(time: Res<Time>, mut q: Query<&mut Transform, With<WaterSheen>>) {
-    let t = time.elapsed_secs();
-    for mut tf in q.iter_mut() {
-        let a = (t * 0.95 + 1.3).sin();
-        tf.translation.y = -0.005 + a * 0.014;
-        tf.scale.y = 0.03 * (1.0 + a * 0.4);
-        tf.scale.x = 189.0 + (t * 0.4).cos() * 0.6;
+        tf.translation.y = -0.12 + (t * 0.5).sin() * 0.05;
     }
 }
 
 fn foam_system(time: Res<Time>, mut q: Query<(&mut Transform, &Foam)>) {
     let t = time.elapsed_secs();
     for (mut tf, f) in q.iter_mut() {
-        let span = 150.0;
-        let x = (t * f.speed + f.phase).rem_euclid(span) - span * 0.5;
-        tf.translation = Vec3::new(
-            x,
-            0.012 + (t * 1.7 + f.phase).sin() * 0.008,
-            f.lane + (t * 0.3 + f.phase).sin() * 0.35,
-        );
-        tf.scale.x = 9.0 * (0.7 + (t * 1.3 + f.phase).sin() * 0.3);
-        tf.scale.z = 0.35 * (1.0 + (t * 0.9 + f.phase).cos() * 0.5);
+        let wave = (t * f.speed + f.phase).sin();
+        tf.translation.z = f.base_z + wave * 1.1;
+        tf.translation.y = 0.02 + wave.max(0.0) * 0.03;
+        tf.scale.x = 60.0 + wave * 6.0;
+        let fade = (wave * 0.5 + 0.5).clamp(0.2, 1.0);
+        tf.scale.z = 0.5 * fade;
     }
 }
 
-fn mote_system(time: Res<Time>, mut q: Query<(&mut Transform, &Mote)>) {
+fn sparkle_system(time: Res<Time>, mut q: Query<(&mut Transform, &Sparkle)>) {
     let t = time.elapsed_secs();
-    for (mut tf, m) in q.iter_mut() {
-        let a = t * m.speed + m.phase;
-        tf.translation = m.base
-            + Vec3::new(
-                a.sin() * m.radius,
-                (a * 1.7).sin() * m.radius * 0.6,
-                (a * 0.8).cos() * m.radius,
-            );
+    for (mut tf, s) in q.iter_mut() {
+        let tw = (t * 3.0 + s.phase).sin().max(0.0);
+        tf.scale = Vec3::splat(0.06 + tw * 0.14);
     }
 }
 
-fn cloud_system(time: Res<Time>, mut q: Query<&mut Transform, With<CloudPuff>>) {
+fn steam_system(time: Res<Time>, mut q: Query<(&mut Transform, &Steam)>) {
     let t = time.elapsed_secs();
-    for mut tf in q.iter_mut() {
-        let span = 560.0;
-        tf.translation.x = (tf.translation.x + t * 0.4).rem_euclid(span) - span * 0.5;
+    for (mut tf, s) in q.iter_mut() {
+        let p = ((t * 0.5 + s.phase) % 1.0 + 1.0) % 1.0;
+        tf.translation.y = s.base.y + p * 0.55;
+        tf.translation.x = s.base.x + (p * 4.0).sin() * 0.03;
+        let sc = 0.05 * (1.0 - p * 0.6);
+        tf.scale = Vec3::splat(sc.max(0.001));
+    }
+}
+
+fn cloud_system(time: Res<Time>, mut q: Query<(&mut Transform, &CloudPuff)>) {
+    let t = time.elapsed_secs();
+    for (mut tf, cp) in q.iter_mut() {
+        let span = 700.0;
+        tf.translation.x = (tf.translation.x + t * cp.speed).rem_euclid(span) - span * 0.5;
     }
 }
 
@@ -1275,50 +1262,22 @@ fn bird_system(time: Res<Time>, mut q: Query<(&mut Transform, &Bird)>) {
     let t = time.elapsed_secs();
     for (mut tf, b) in q.iter_mut() {
         let a = t * b.speed + b.phase;
-        tf.translation = b.center
-            + Vec3::new(
-                a.cos() * b.radius,
-                b.height + (a * 2.0).sin() * 1.1,
-                a.sin() * b.radius * 0.55,
-            );
+        tf.translation = b.center + Vec3::new(
+            a.cos() * b.radius,
+            b.height + (a * 2.0).sin() * 1.1,
+            a.sin() * b.radius * 0.55,
+        );
         tf.rotation = Quat::from_rotation_y(-(a + PI * 0.5));
-        tf.scale.y = 0.2 * (0.55 + (a * 6.0).sin().abs() * 0.7);
+        tf.scale.y = 0.2 * (0.4 + (a * 8.0).sin().abs() * 0.8);
     }
 }
 
-fn drink_system(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mode: Res<RelaxMode>,
-    mut q: Query<(&mut Transform, &Drink)>,
-    mut pose: ResMut<DrinkPose>,
-) {
-    let dt = time.delta_secs().min(0.05);
-    let alpha = (dt * 7.5).min(1.0);
-    let sipping = *mode == RelaxMode::Resting && keys.pressed(KeyCode::Space);
-
-    let mut latest = (Vec3::ZERO, Quat::IDENTITY);
-
-    for (mut tf, d) in q.iter_mut() {
-        let base = if *mode == RelaxMode::Resting { d.rest } else { d.walk };
-        let target = if sipping { d.mouth } else { base };
-        tf.translation = tf.translation.lerp(target, alpha);
-
-        let span = d.mouth.distance(base).max(0.001);
-        let prog = (tf.translation.distance(base) / span).clamp(0.0, 1.0);
-        tf.rotation = Quat::from_euler(EulerRot::ZYX, prog * 0.85, prog * 0.2, 0.0);
-        tf.scale.y = 1.0 - prog * 0.08;
-
-        latest = (tf.translation, tf.rotation);
-    }
-
-    pose.translation = latest.0;
-    pose.rotation = latest.1;
-}
-
-fn accessory_system(pose: Res<DrinkPose>, mut q: Query<(&mut Transform, &Accessory)>) {
-    for (mut tf, a) in q.iter_mut() {
-        tf.translation = pose.translation + pose.rotation * a.offset;
-        tf.rotation = pose.rotation * a.rot;
+fn yacht_system(time: Res<Time>, mut q: Query<(&mut Transform, &Yacht)>) {
+    let t = time.elapsed_secs();
+    for (mut tf, y) in q.iter_mut() {
+        let bob = (t * 0.8 + y.phase).sin();
+        let roll = (t * 0.6 + y.phase).sin();
+        tf.translation.y = y.base.y + bob * 0.25;
+        tf.rotation = Quat::from_rotation_z(roll * 0.05) * Quat::from_rotation_x(roll * 0.03);
     }
 }
